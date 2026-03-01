@@ -1,8 +1,8 @@
 # Shelfard
 
-Schema drift detection for REST APIs and databases.
+Detect schema drift in REST APIs and databases. Know exactly what changes and who breaks.
 
-Capture the shape of a data source once, then re-check it any time to surface unexpected changes before they break downstream pipelines or consumers.
+Shelfard snapshots the structure of your data sources, classifies every change as SAFE, WARNING, or BREAKING, and tracks which downstream consumers are affected. Store check configurations once and run them from a CLI, a CI pipeline, an MCP-compatible client, or a conversational agent.
 
 ---
 

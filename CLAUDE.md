@@ -1,10 +1,10 @@
-# Shelfard — Schema Drift Detection Agent
+# Shelfard — Schema Drift Detection
 
 ## Project Purpose
 
-Shelfard is a Python tool for detecting, classifying, and reporting **schema drift** in databases — unexpected or untracked changes to database schemas that could break downstream data pipelines or consumers.
+Shelfard is a schema drift detection tool for REST APIs and databases. It captures versioned snapshots of data source shapes, classifies every change as SAFE, WARNING, or BREAKING, tracks which downstream consumers are impacted, and stores check configurations for repeatable on-demand or CI-driven runs.
 
-It is designed as **Day 1 of a multi-phase LLM agent** for autonomous schema management. Deterministic comparison logic is intentionally kept separate from LLM reasoning, so only genuinely ambiguous cases need model involvement.
+The system is built in layers: **Acquisition** (vendor readers normalize raw schemas), **Registry** (versioned, pluggable storage), **Checkers** (stored run configs with env-var-resolved auth), and **MCP/Agent** (a standalone MCP server and a conversational assistant that expose all tools to LLM clients). Deterministic drift classification is kept strictly separate from LLM reasoning — the agent handles interpretation and orchestration, not severity decisions.
 
 ---
 
