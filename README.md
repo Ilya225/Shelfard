@@ -242,6 +242,36 @@ The agent has access to two registry tools: listing all schemas and reading a sp
 
 ---
 
+## Docker
+
+Two images are provided for testing and exploration. Both are based on `continuumio/miniconda3` with Python 3.12.
+
+### Smoke test image
+
+Runs a fresh `pip install` and exercises every CLI command against [JSONPlaceholder](https://jsonplaceholder.typicode.com) on every `docker run`. Non-zero exit on any failure.
+
+```bash
+docker build -f docker/Dockerfile.test -t shelfard-test .
+docker run --rm shelfard-test
+```
+
+### Playground image
+
+Shelfard is pre-installed and the registry is pre-seeded with three schemas (`todos`, `users`, `posts`) and two consumer subscriptions. Drops into an interactive bash shell with a welcome message.
+
+```bash
+docker build -f docker/Dockerfile.playground -t shelfard-playground .
+docker run --rm -it shelfard-playground
+```
+
+Mount a named volume to persist your registry across sessions:
+
+```bash
+docker run --rm -it -v shelfard-data:/shelfard/schemas shelfard-playground
+```
+
+---
+
 ## How it works
 
 1. **Snapshot** — fetches the endpoint, infers a typed schema from the JSON response (nested objects become `STRUCT` columns), and saves it to the registry under `schemas/sources/`.

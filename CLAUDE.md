@@ -70,6 +70,15 @@ Shelfard/
 │       └── json_file_reader.py   # infer_schema_from_json_file, read_and_register_json_file
 ├── tests/
 │   └── test_rest_reader.py       # 7 REST integration tests (mock HTTP server, no real network)
+├── docker/
+│   ├── Dockerfile.test           # Smoke test image — fresh pip install + all CLI commands on every `docker run`
+│   ├── Dockerfile.playground     # Interactive sandbox — shelfard pre-installed, registry pre-seeded
+│   └── test.sh                   # Entrypoint script for Dockerfile.test
+├── docs/
+│   └── test.md                   # Testing guide: unit tests, integration tests, CI, Docker images
+├── .github/workflows/
+│   └── python-package-conda.yml  # CI: pip install + flake8 + run_tests.py + test_rest_reader.py on every push/PR
+├── .dockerignore                 # Excludes schemas/, egg-info, caches from Docker build context
 ├── pyproject.toml                # Packaging metadata and entry point (shelfard = "shelfard.cli:main")
 ├── Formula/shelfard.rb           # Homebrew formula (copy to homebrew-shelfard tap repo to publish)
 ├── run_tests.py                  # 47 unit tests covering the full pipeline (no external test framework)
@@ -120,6 +129,20 @@ conda run -n shelfard python3 run_tests.py
 # REST integration tests (7) — uses mock HTTP server, no real network needed
 conda run -n shelfard python3 tests/test_rest_reader.py
 ```
+
+### Docker — smoke test (rerunnable, fresh install each time)
+```bash
+docker build -f docker/Dockerfile.test -t shelfard-test .
+docker run --rm shelfard-test
+```
+
+### Docker — interactive playground (pre-seeded registry)
+```bash
+docker build -f docker/Dockerfile.playground -t shelfard-playground .
+docker run --rm -it shelfard-playground
+```
+
+See `docs/test.md` for the full testing guide.
 
 ---
 
