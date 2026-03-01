@@ -109,45 +109,45 @@ async def _run_repl(model_id: str, provider: str) -> None:
     """Async REPL — connects to the MCP server and runs the agent loop."""
     llm = _build_llm(model_id, provider)
 
-    async with MultiServerMCPClient({
+    client = MultiServerMCPClient({
         "shelfard": {
             "command": sys.executable,
             "args": ["-m", "shelfard.mcp_server"],
             "transport": "stdio",
         }
-    }) as client:
-        tools  = client.get_tools()
-        agent  = create_agent(
-            llm,
-            tools,
-            system_prompt=SYSTEM_PROMPT,
-            checkpointer=MemorySaver(),
-        )
-        config = {"configurable": {"thread_id": "session"}}
+    })
+    tools  = await client.get_tools()
+    agent  = create_agent(
+        llm,
+        tools,
+        system_prompt=SYSTEM_PROMPT,
+        checkpointer=MemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "session"}}
 
-        print(f"Shelfard Agent  [{model_id}]  (type 'exit' to quit)")
-        print()
+    print(f"Shelfard Agent  [{model_id}]  (type 'exit' to quit)")
+    print()
 
-        while True:
-            try:
-                user_input = input("You: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
+    while True:
+        try:
+            user_input = input("You: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
 
-            if user_input.lower() in ("exit", "quit", "q") or not user_input:
-                break
+        if user_input.lower() in ("exit", "quit", "q") or not user_input:
+            break
 
-            try:
-                state = await agent.ainvoke(
-                    {"messages": [HumanMessage(content=user_input)]},
-                    config=config,
-                )
-            except Exception as e:
-                print(f"Agent error: {e}")
-                continue
+        try:
+            state = await agent.ainvoke(
+                {"messages": [HumanMessage(content=user_input)]},
+                config=config,
+            )
+        except Exception as e:
+            print(f"Agent error: {e}")
+            continue
 
-            print(f"Agent: {state['messages'][-1].content}\n")
+        print(f"Agent: {state['messages'][-1].content}\n")
 
 
 def run_agent(model: Optional[str] = None) -> None:
