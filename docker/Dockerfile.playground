@@ -11,6 +11,8 @@
 #
 # To persist your registry across sessions, mount a volume:
 #   docker run --rm -it -v shelfard-data:/shelfard/schemas shelfard-playground
+#
+# Note: the registry is stored at /shelfard/schemas/ (LocalFileRegistry default relative to WORKDIR)
 
 FROM continuumio/miniconda3
 
@@ -18,10 +20,9 @@ FROM continuumio/miniconda3
 RUN conda install -y -c conda-forge python=3.12 && conda clean -afy
 
 WORKDIR /shelfard
-COPY . .
 
-# Install shelfard and ipython for interactive exploration
-RUN pip install -e . && pip install ipython
+# Install the latest pushed shelfard from GitHub and ipython for interactive exploration
+RUN pip install git+https://github.com/Ilya225/shelfard.git ipython
 
 # Pre-seed the registry with sample schemas
 RUN shelfard rest snapshot https://jsonplaceholder.typicode.com/todos/1 --name todos \

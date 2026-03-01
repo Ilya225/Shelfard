@@ -119,7 +119,7 @@ Each `docker run` does a completely fresh `pip install` of shelfard from the loc
 
 | Step | Command |
 |---|---|
-| Install | `pip install -e /shelfard` |
+| Install | `pip install git+https://github.com/Ilya225/shelfard.git` |
 | Snapshot | `shelfard rest snapshot .../todos/1 --name todos` |
 | Snapshot | `shelfard rest snapshot .../users/1 --name users` |
 | No-drift check | `shelfard rest check .../todos/1 --name todos` |
