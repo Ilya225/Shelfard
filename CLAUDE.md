@@ -15,7 +15,7 @@ Layered design — each layer is deterministic and agent-ready:
 - **Layer 1 — Acquisition** (`shelfard/readers/`): Vendor-specific readers extract raw schemas and normalize them to `TableSchema`; document parsers live in `shelfard/parsers/`
 - **Layer 1 — Registry** (`shelfard/registry/`): Pluggable registry with a `SchemaRegistry` ABC and a `LocalFileRegistry` implementation. Tracks both source schema versions and consumer subscriptions (full or projected). Stubs exist for S3, GCS, and SQL backends.
 - **Layer 2 — Comparison** (`shelfard/schema_comparison.py`): Pure deterministic diffing, produces self-documenting `SchemaDiff`
-- **Layer 3 — Agent** (`shelfard/agent.py`): Interactive Claude-powered assistant; wraps registry tools as Anthropic tool-use definitions
+- **Layer 3 — Agent** (`shelfard/agent.py`): Interactive LangChain 1.x assistant (`create_agent` + `MemorySaver`); supports Claude and OpenAI; model resolved via `--model` flag or env-var auto-detection (`ANTHROPIC_API_KEY` → Claude, `OPENAI_API_KEY` → GPT-4o)
 - **Future layers** (planned): Autonomous remediation suggestions, background drift monitoring, consumer-aware alerting
 
 All tools return `ToolResult` with: `success`, `data`, `error`, `next_action_hint`.
@@ -32,7 +32,7 @@ All tools return `ToolResult` with: `success`, `data`, `error`, `next_action_hin
 | `shelfard list schemas` | List all registered source schemas (name, columns, versions, source, latest version) |
 | `shelfard list subscriptions` | List all consumer subscriptions across all tables |
 | `shelfard subscribe <table> --consumer NAME [--columns COL1,COL2,...]` | Subscribe a consumer to a schema (full or projected) |
-| `shelfard agent` | Interactive Claude-powered schema assistant |
+| `shelfard agent [--model MODEL]` | Interactive schema assistant; auto-detects Claude or OpenAI from env |
 
 Exit codes: `0` = success / no drift, `1` = drift detected, `2` = error.
 
@@ -109,7 +109,7 @@ Each vendor's raw-type-to-`ColumnType` mapping lives exclusively in its own read
 ## Tech Stack
 
 - **Language**: Python 3.12 (conda env: `shelfard`)
-- **Dependencies**: `requests` (REST reader), `anthropic` (agent); all other code is stdlib. Declared in `pyproject.toml`.
+- **Dependencies**: `requests` (REST reader), `langchain` + `langchain-anthropic` + `langchain-openai` (agent); all other code is stdlib. Declared in `pyproject.toml`.
 - **Supported sources**: SQLite, REST API endpoints; PostgreSQL, Snowflake, BigQuery (type maps only, readers pending)
 
 ### Running tests

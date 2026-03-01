@@ -190,15 +190,38 @@ The subscription records a snapshot of the relevant columns at the time of the c
 
 ## CLI — Interactive schema assistant
 
-Start a conversational agent that can query your schema registry using Claude:
+Start a conversational agent that can query your schema registry. The model is auto-detected from your environment, or specified explicitly with `--model`.
+
+### Auto-detect from environment
 
 ```bash
+# Claude (if ANTHROPIC_API_KEY is set)
 export ANTHROPIC_API_KEY=<your-key>
+shelfard agent
+
+# OpenAI (if OPENAI_API_KEY is set)
+export OPENAI_API_KEY=<your-key>
 shelfard agent
 ```
 
+### Explicit model selection
+
+```bash
+# Provider shorthand — uses the default model for that provider
+shelfard agent --model anthropic      # claude-sonnet-4-6
+shelfard agent --model openai         # gpt-4o
+
+# Specific model ID
+shelfard agent --model claude-opus-4-6
+shelfard agent --model gpt-4o-mini
 ```
-Shelfard Agent  (type 'exit' to quit)
+
+The `--model` flag requires the corresponding API key to be set (`ANTHROPIC_API_KEY` for Claude models, `OPENAI_API_KEY` for OpenAI models).
+
+### Example session
+
+```
+Shelfard Agent  [claude-sonnet-4-6]  (type 'exit' to quit)
 
 You: what schemas do I have?
 Agent: You have 2 schemas stored:

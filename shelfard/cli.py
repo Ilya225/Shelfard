@@ -272,9 +272,9 @@ def cmd_subscribe(args) -> int:
 
 # ── Agent command ─────────────────────────────────────────────────────────────
 
-def cmd_agent(_args) -> int:
+def cmd_agent(args) -> int:
     from shelfard.agent import run_agent
-    run_agent()
+    run_agent(model=args.model)
     return 0
 
 
@@ -336,7 +336,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     agent_p = top.add_parser(
         "agent",
-        help="Start an interactive schema assistant powered by Claude",
+        help="Start an interactive schema assistant (Claude or OpenAI)",
+    )
+    agent_p.add_argument(
+        "--model", metavar="MODEL", default=None,
+        help=(
+            "Model to use: provider shorthand ('anthropic', 'openai') or a specific "
+            "model ID ('claude-sonnet-4-6', 'gpt-4o', 'gpt-4o-mini', ...). "
+            "If omitted, auto-detected from ANTHROPIC_API_KEY or OPENAI_API_KEY."
+        ),
     )
     agent_p.set_defaults(func=cmd_agent)
 
