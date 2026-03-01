@@ -15,7 +15,8 @@ Layered design — each layer is deterministic and agent-ready:
 - **Layer 1 — Acquisition** (`shelfard/readers/`): Vendor-specific readers extract raw schemas and normalize them to `TableSchema`; document parsers live in `shelfard/parsers/`
 - **Layer 1 — Registry** (`shelfard/registry/`): Pluggable registry with a `SchemaRegistry` ABC and a `LocalFileRegistry` implementation. Tracks both source schema versions and consumer subscriptions (full or projected). Stubs exist for S3, GCS, and SQL backends.
 - **Layer 2 — Comparison** (`shelfard/schema_comparison.py`): Pure deterministic diffing, produces self-documenting `SchemaDiff`
-- **Layer 3 — Agent** (`shelfard/agent.py`): Interactive LangChain 1.x assistant (`create_agent` + `MemorySaver`); supports Claude and OpenAI; model resolved via `--model` flag or env-var auto-detection (`ANTHROPIC_API_KEY` → Claude, `OPENAI_API_KEY` → GPT-4o)
+- **Layer 3 — MCP Server** (`shelfard/mcp_server.py`): Standalone FastMCP server exposing four registry tools over stdio — `get_schema`, `get_schemas`, `get_subscriptions`, `get_subscription`. Any MCP client (Claude Desktop, Cursor, etc.) can connect directly.
+- **Layer 3 — Agent** (`shelfard/agent.py`): Interactive LangChain 1.x assistant; spawns the MCP server as a subprocess via `MultiServerMCPClient` and gets its tools from there. Supports Claude and OpenAI; model resolved via `--model` flag or env-var auto-detection.
 - **Future layers** (planned): Autonomous remediation suggestions, background drift monitoring, consumer-aware alerting
 
 All tools return `ToolResult` with: `success`, `data`, `error`, `next_action_hint`.
@@ -32,7 +33,8 @@ All tools return `ToolResult` with: `success`, `data`, `error`, `next_action_hin
 | `shelfard list schemas` | List all registered source schemas (name, columns, versions, source, latest version) |
 | `shelfard list subscriptions` | List all consumer subscriptions across all tables |
 | `shelfard subscribe <table> --consumer NAME [--columns COL1,COL2,...]` | Subscribe a consumer to a schema (full or projected) |
-| `shelfard agent [--model MODEL]` | Interactive schema assistant; auto-detects Claude or OpenAI from env |
+| `shelfard agent [--model MODEL]` | Interactive schema assistant; spawns MCP server internally; auto-detects Claude or OpenAI from env |
+| `shelfard mcp` | Start the MCP server (stdio transport) — for use with Claude Desktop, Cursor, or any MCP client |
 
 Exit codes: `0` = success / no drift, `1` = drift detected, `2` = error.
 
@@ -53,7 +55,8 @@ Shelfard/
 │   │   ├── s3.py                 # S3Registry(bucket, prefix) — stub
 │   │   ├── gcs.py                # GCSRegistry(bucket, prefix) — stub
 │   │   └── sql.py                # SQLRegistry(connection_string) — stub
-│   ├── agent.py                  # run_agent() REPL — TOOLS definitions, _execute_tool, SYSTEM_PROMPT
+│   ├── mcp_server.py             # FastMCP server — get_schema, get_schemas, get_subscriptions, get_subscription (stdio)
+│   ├── agent.py                  # run_agent() async REPL — spawns MCP server via MultiServerMCPClient, supports Claude + OpenAI
 │   ├── schema_comparison.py      # Layer 2: Diff schemas, classify changes by severity
 │   ├── type_normalizer.py        # Vendor-agnostic utilities: TYPE_WIDENING_RULES, is_safe_widening, extract_length
 │   ├── readers/                  # Live source readers — each vendor is its own package
@@ -118,7 +121,7 @@ Each vendor's raw-type-to-`ColumnType` mapping lives exclusively in its own read
 ## Tech Stack
 
 - **Language**: Python 3.12 (conda env: `shelfard`)
-- **Dependencies**: `requests` (REST reader), `langchain` + `langchain-anthropic` + `langchain-openai` (agent); all other code is stdlib. Declared in `pyproject.toml`.
+- **Dependencies**: `requests` (REST reader), `langchain` + `langchain-anthropic` + `langchain-openai` (agent), `mcp` + `langchain-mcp-adapters` (MCP server + client); all other code is stdlib. Declared in `pyproject.toml`.
 - **Supported sources**: SQLite, REST API endpoints; PostgreSQL, Snowflake, BigQuery (type maps only, readers pending)
 
 ### Running tests

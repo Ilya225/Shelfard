@@ -238,7 +238,49 @@ Agent: The posts schema has 4 columns:
 You: exit
 ```
 
-The agent has access to two registry tools: listing all schemas and reading a specific one. It can answer questions, summarise schema shapes, and suggest next steps.
+The agent has access to four registry tools via the Shelfard MCP server: `get_schemas`, `get_schema`, `get_subscriptions`, `get_subscription`. It can answer questions, summarise schema shapes, and suggest next steps.
+
+---
+
+## MCP server
+
+Shelfard exposes its registry as a standalone **Model Context Protocol server**, so any MCP-compatible client can query schemas and subscriptions directly — without going through the interactive agent.
+
+### Start the server
+
+```bash
+shelfard mcp
+```
+
+The server runs over **stdio** (the MCP standard for local tools). It exposes four tools:
+
+| Tool | Description |
+|---|---|
+| `get_schemas` | List all registered schemas with summary info |
+| `get_schema(schema_name)` | Retrieve a specific schema with full column detail |
+| `get_subscriptions` | List all consumer subscriptions |
+| `get_subscription(consumer_name, table_name)` | Retrieve a specific consumer subscription |
+
+### Claude Desktop
+
+Add to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "shelfard": {
+      "command": "shelfard",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Claude will then be able to call the Shelfard tools directly in any conversation.
+
+### Cursor / other MCP clients
+
+Point your MCP client at `shelfard mcp` with stdio transport. The server reads from the local registry (`./schemas/`) in the working directory where it is launched.
 
 ---
 
