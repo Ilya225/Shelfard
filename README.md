@@ -18,6 +18,9 @@ Or, once published to PyPI:
 
 ```bash
 pip install shelfard
+
+# With PostgreSQL support (psycopg2-binary)
+pip install shelfard[postgres]
 ```
 
 ### Homebrew
@@ -114,6 +117,68 @@ shelfard rest check --help
 
 ---
 
+---
+
+## CLI — PostgreSQL drift detection
+
+Snapshot and check the schema of a PostgreSQL table, view, or custom SQL query. Install the optional driver first:
+
+```bash
+pip install psycopg2-binary
+# or: pip install shelfard[postgres]
+```
+
+### Table or view mode
+
+```bash
+shelfard postgres snapshot --dsn "postgresql://user:pass@host/db" --table orders --name orders
+shelfard postgres check    --dsn "postgresql://user:pass@host/db" --table orders --name orders
+```
+
+```
+Reading PostgreSQL 'orders' …
+✓ Snapshot saved: 'orders' (version 1, 7 top-level columns)
+```
+
+### Custom SQL query mode
+
+Use this when you want to track the shape of a join, aggregation, or any derived result set — not a single table:
+
+```bash
+shelfard postgres snapshot \
+  --dsn "postgresql://user:pass@host/db" \
+  --query "SELECT o.id, o.total, u.email FROM orders o JOIN users u ON o.user_id = u.id" \
+  --name order_summary
+
+shelfard postgres check \
+  --dsn "postgresql://user:pass@host/db" \
+  --query "SELECT o.id, o.total, u.email FROM orders o JOIN users u ON o.user_id = u.id" \
+  --name order_summary
+```
+
+Nullability is inferred from sampled data: columns with zero NULL values across the first 100 rows are treated as NOT NULL by contract.
+
+### Credentials via environment variables
+
+Put secrets in env vars rather than the connection string directly:
+
+```bash
+export PG_PASS=secret
+shelfard postgres snapshot \
+  --dsn "postgresql://user:$PG_PASS@host/db" \
+  --table orders --name orders
+```
+
+### Non-public schema
+
+```bash
+shelfard postgres snapshot \
+  --dsn "postgresql://user:pass@host/db" \
+  --table reports --name reports --db-schema analytics
+```
+
+---
+
 ## CLI — Inspect the registry
 
 ### Show a schema
@@ -198,28 +263,45 @@ The subscription records a snapshot of the relevant columns at the time of the c
 
 ## CLI — Checker (stored drift-check configs)
 
-Register a check configuration once, then run it any time — from the CLI, from code, or via the MCP server — without repeating the URL or auth details.
+Register a check configuration once, then run it any time — from the CLI, from code, or via the MCP server — without repeating the URL, DSN, or auth details. Two checker types are supported: `rest` (default) and `postgres`.
 
-### Register a checker
+### REST checker
 
 ```bash
-shelfard checker register <name> --url <url>
-```
-
-```
-$ shelfard checker register users --url https://api.example.com/users/1
+shelfard checker register users --url https://api.example.com/users/1
 ✓ Checker registered for 'users'  (rest · 0 env vars)
 ```
 
-### Authentication via environment variables
-
-Env var names are stored in the config; their values are resolved from the environment at run time and never persisted:
+With authentication (env var names stored, values resolved at run time):
 
 ```bash
 shelfard checker register users \
   --url 'https://api.example.com/users/1' \
   --header 'Authorization=$BEARER_TOKEN' \
   --env BEARER_TOKEN
+```
+
+### PostgreSQL checker — table mode
+
+```bash
+shelfard checker register orders \
+  --type postgres \
+  --dsn 'postgresql://user:$PG_PASS@host/db' \
+  --table orders \
+  --env PG_PASS
+✓ Checker registered for 'orders'  (postgres · 1 env var)
+```
+
+### PostgreSQL checker — query mode
+
+Track the schema of a derived result set. Nullability is re-sampled from live data on every run:
+
+```bash
+shelfard checker register order_summary \
+  --type postgres \
+  --dsn 'postgresql://user:$PG_PASS@host/db' \
+  --query 'SELECT o.id, o.total, u.email FROM orders o JOIN users u ON o.user_id = u.id' \
+  --env PG_PASS
 ```
 
 ### Run a checker
@@ -229,26 +311,25 @@ shelfard checker run <name>
 ```
 
 ```
-$ shelfard checker run users
-Fetching https://api.example.com/users/1 …
-✓ No drift detected for 'users'  (last snapshot: 2026-03-01T10:00:00)
+$ shelfard checker run orders
+Checking PostgreSQL 'orders' …
+✓ No drift detected for 'orders'  (last snapshot: 2026-03-01T10:00:00)
 ```
 
-Drift output follows the same format as `shelfard rest check`. Exit code `1` on drift makes this suitable for CI.
+Drift output follows the same format as `shelfard postgres check`. Exit code `1` on drift makes this suitable for CI.
 
 ### Show and list checkers
 
 ```bash
-shelfard checker show <name>
+shelfard checker show orders
 ```
 
 ```
-Checker: users
-  type:  rest
-  url:   https://api.example.com/users/1
-  env:   BEARER_TOKEN
-  headers:
-    Authorization: $BEARER_TOKEN
+Checker: orders
+  type:  postgres
+  dsn:   postgresql://user:$PG_PASS@host/db
+  table: orders
+  env:   PG_PASS
 ```
 
 ```bash
@@ -256,10 +337,11 @@ shelfard checker list
 ```
 
 ```
-Checkers (2):
+Checkers (3):
 
-  users    rest   https://api.example.com/users/1   BEARER_TOKEN   2026-03-01T...
-  posts    rest   https://api.example.com/posts/1   —              2026-03-01T...
+  users          rest     https://api.example.com/users/1          BEARER_TOKEN   2026-03-01T...
+  orders         postgres postgresql://user:$PG_PASS@host/db       PG_PASS        2026-03-01T...
+  order_summary  postgres postgresql://user:$PG_PASS@host/db       PG_PASS        2026-03-01T...
 ```
 
 ---
@@ -395,8 +477,14 @@ docker run --rm -it -v shelfard-data:/shelfard/schemas shelfard-playground
 
 ## How it works
 
+**For REST endpoints:**
 1. **Snapshot** — fetches the endpoint, infers a typed schema from the JSON response (nested objects become `STRUCT` columns), and saves it to the registry under `schemas/sources/`.
 2. **Check** — fetches the endpoint again, diffs the new schema against the saved baseline using deterministic rules, and classifies every change as `SAFE`, `WARNING`, or `BREAKING`.
+
+**For PostgreSQL:**
+1. **Snapshot (table mode)** — connects and reads column definitions from `information_schema.columns`, capturing exact types and NOT NULL constraints as declared in the catalog.
+2. **Snapshot (query mode)** — executes the custom SQL query, resolves PostgreSQL type OIDs via `pg_catalog.pg_type`, and samples up to 100 rows to infer nullability. Columns with zero NULLs in the sample are marked NOT NULL by contract.
+3. **Check** — re-reads the live schema using the same mode and diffs against the saved baseline.
 
 Change classification is fully deterministic — no LLM involved for clear-cut cases:
 

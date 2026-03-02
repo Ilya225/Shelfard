@@ -1,9 +1,8 @@
 """
-SchemaReader — abstract base class for live database source introspectors.
+Base classes for Shelfard tools.
 
-Each vendor (SQLite, Postgres, BigQuery, etc.) implements this interface.
-JSON schema parsing is a separate concern (document deserialization, not
-live source introspection) and does not implement this ABC.
+SchemaReader — abstract base for live database/API source introspectors.
+Checker      — abstract base for stored drift-check configurations.
 """
 
 from abc import ABC, abstractmethod
@@ -33,3 +32,17 @@ class SchemaReader(ABC):
             ToolResult with data={"tables": [...], "count": int} on success.
         """
         ...
+
+
+class Checker(ABC):
+    @abstractmethod
+    def run(self) -> ToolResult:
+        """
+        Run the drift check.
+
+        Returns ToolResult with data={
+            "schema_name": str,
+            "baseline_version": str,
+            "diff": dict,       # SchemaDiff serialized
+        }
+        """

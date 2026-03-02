@@ -2,10 +2,10 @@
 
 import os
 
-from ..models import RestCheckerConfig, ToolResult
-from ..readers import RestEndpointReader
-from ..schema_comparison import compare_schemas_from_dicts
-from .base import Checker
+from ...models import RestCheckerConfig, ToolResult
+from .reader import RestEndpointReader
+from ...schema_comparison import compare_schemas_from_dicts
+from ..base import Checker
 
 
 class RestChecker(Checker):

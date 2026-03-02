@@ -239,6 +239,49 @@ class RestCheckerConfig:
         )
 
 
+@dataclass
+class PostgresCheckerConfig:
+    """Stored configuration for a PostgreSQL drift check.
+
+    Two modes:
+      - table mode: set ``table`` to introspect a single table or view
+      - query mode: set ``query`` to infer schema from a custom SQL query
+
+    ``dsn`` may contain ``$VAR`` placeholders (e.g. ``postgresql://user:$PG_PASS@host/db``).
+    ``env`` lists the env var *names* whose values are substituted at run time.
+    Values are never stored.
+    """
+    schema_name: str
+    dsn: str                        # e.g. "postgresql://user:$PG_PASS@host/db"
+    env: list[str]                  # required env var names (never values)
+    table: Optional[str] = None     # table/view name  (table mode)
+    query: Optional[str] = None     # SQL query        (query mode)
+    db_schema: str = "public"       # PostgreSQL schema namespace
+    sample_size: int = 100          # rows to sample for nullability inference
+    checker_type: str = "postgres"
+    registered_at: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2, default=str)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PostgresCheckerConfig":
+        return cls(
+            schema_name=d["schema_name"],
+            dsn=d["dsn"],
+            env=d.get("env", []),
+            table=d.get("table"),
+            query=d.get("query"),
+            db_schema=d.get("db_schema", "public"),
+            sample_size=d.get("sample_size", 100),
+            checker_type=d.get("checker_type", "postgres"),
+            registered_at=d.get("registered_at"),
+        )
+
+
 # ─────────────────────────────────────────────
 # Tool result wrapper
 # ─────────────────────────────────────────────

@@ -5,7 +5,7 @@ Uses a local mock HTTP server (stdlib http.server + socketserver) so no real
 network is needed. Each test starts its own server on a random OS-assigned port
 and shuts it down in a finally block.
 
-Run: conda run -n shelfard python3 tests/test_rest_reader.py
+Run: conda run -n shelfard python3 tests/rest_tests.py
 """
 
 import http.server

@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from ..models import TableSchema, SchemaDiff, ToolResult, RestCheckerConfig
+from ..models import TableSchema, SchemaDiff, ToolResult, RestCheckerConfig, PostgresCheckerConfig
 
 
 class SchemaRegistry(ABC):
@@ -87,7 +87,11 @@ class SchemaRegistry(ABC):
     # ── Checkers ──────────────────────────────────────────────────────────────
 
     @abstractmethod
-    def register_checker(self, schema_name: str, config: RestCheckerConfig) -> ToolResult:
+    def register_checker(
+        self,
+        schema_name: str,
+        config: RestCheckerConfig | PostgresCheckerConfig,
+    ) -> ToolResult:
         """Store a checker config for the given schema."""
         ...
 

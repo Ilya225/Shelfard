@@ -19,7 +19,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from ..models import ColumnSchema, TableSchema, ConsumerSubscription, SchemaDiff, ToolResult, RestCheckerConfig
+from ..models import (
+    ColumnSchema, TableSchema, ConsumerSubscription, SchemaDiff, ToolResult,
+    RestCheckerConfig, PostgresCheckerConfig,
+)
 from .base import SchemaRegistry
 
 
@@ -321,7 +324,11 @@ class LocalFileRegistry(SchemaRegistry):
     def _checker_path(self, schema_name: str) -> Path:
         return self._checkers_dir() / f"{schema_name}.json"
 
-    def register_checker(self, schema_name: str, config: RestCheckerConfig) -> ToolResult:
+    def register_checker(
+        self,
+        schema_name: str,
+        config: RestCheckerConfig | PostgresCheckerConfig,
+    ) -> ToolResult:
         """Store a checker config. Always overwrites — checkers are not versioned."""
         config.registered_at = datetime.utcnow().isoformat()
         path = self._checker_path(schema_name)
@@ -343,8 +350,8 @@ class LocalFileRegistry(SchemaRegistry):
                 error=f"No checker registered for '{schema_name}'.",
             )
         try:
-            config = RestCheckerConfig.from_dict(self._load_json(path))
-            return ToolResult(success=True, data={"checker": config.to_dict()})
+            raw = self._load_json(path)
+            return ToolResult(success=True, data={"checker": raw})
         except Exception as e:
             return ToolResult(success=False, error=f"Failed to read checker: {e}")
 
@@ -360,7 +367,8 @@ class LocalFileRegistry(SchemaRegistry):
                 result.append({
                     "schema_name": c["schema_name"],
                     "checker_type": c.get("checker_type", "rest"),
-                    "url": c.get("url", ""),
+                    "url": c.get("url", ""),       # rest checkers
+                    "dsn": c.get("dsn", ""),       # postgres checkers
                     "env": c.get("env", []),
                     "registered_at": c.get("registered_at"),
                 })
@@ -373,9 +381,23 @@ class LocalFileRegistry(SchemaRegistry):
         result = self.get_checker(schema_name)
         if not result.success:
             return result
-        from ..checkers.rest import RestChecker
-        config = RestCheckerConfig.from_dict(result.data["checker"])
-        return RestChecker(config, self).run()
+
+        config_dict = result.data["checker"]
+        checker_type = config_dict.get("checker_type", "rest")
+
+        if checker_type == "rest":
+            from ..tools.rest import RestChecker
+            config = RestCheckerConfig.from_dict(config_dict)
+            return RestChecker(config, self).run()
+        elif checker_type == "postgres":
+            from ..tools.postgres import PostgresChecker
+            config = PostgresCheckerConfig.from_dict(config_dict)
+            return PostgresChecker(config, self).run()
+        else:
+            return ToolResult(
+                success=False,
+                error=f"Unknown checker type: {checker_type!r}",
+            )
 
     # ── Impact analysis ───────────────────────────────────────────────────────
 

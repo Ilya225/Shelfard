@@ -15,10 +15,11 @@ import argparse
 import sys
 
 from shelfard import (
-    ColumnSchema, RestEndpointReader, TableSchema,
+    ColumnSchema, RestEndpointReader, PostgresReader, TableSchema,
     compare_schemas_from_dicts, get_registered_schema, register_schema,
     get_all_schemas, get_all_consumers, subscribe_consumer,
-    RestCheckerConfig, register_checker, get_checker, get_all_checkers, run_checker,
+    RestCheckerConfig, PostgresCheckerConfig,
+    register_checker, get_checker, get_all_checkers, run_checker,
 )
 from shelfard.models import ChangeSeverity
 
@@ -176,6 +177,78 @@ def cmd_rest_check(args) -> int:
     return 0 if not diff["changes"] else 1
 
 
+# ── PostgreSQL commands ───────────────────────────────────────────────────────
+
+def cmd_postgres_snapshot(args) -> int:
+    schema_name = args.name
+    target = args.table or "(custom query)"
+    print(f"Reading PostgreSQL '{target}' …")
+
+    result = PostgresReader(
+        args.dsn,
+        schema_name,
+        table=args.table or None,
+        query=args.query or None,
+        db_schema=args.db_schema,
+    ).get_schema()
+
+    if not result.success:
+        print(red(f"✗ Failed to read schema: {result.error}"))
+        if result.next_action_hint:
+            print(f"  {result.next_action_hint}")
+        return 2
+
+    schema = _schema_from_result(result)
+    reg = register_schema(schema_name, schema)
+    if not reg.success:
+        print(red(f"✗ Failed to register schema: {reg.error}"))
+        return 2
+
+    version = reg.data["version_count"]
+    col_count = len(schema.columns)
+    print(green(f"✓ Snapshot saved: '{schema_name}' (version {version}, {col_count} top-level columns)"))
+    return 0
+
+
+def cmd_postgres_check(args) -> int:
+    schema_name = args.name
+    target = args.table or "(custom query)"
+    print(f"Reading PostgreSQL '{target}' …")
+
+    new_result = PostgresReader(
+        args.dsn,
+        schema_name,
+        table=args.table or None,
+        query=args.query or None,
+        db_schema=args.db_schema,
+    ).get_schema()
+
+    if not new_result.success:
+        print(red(f"✗ Failed to read schema: {new_result.error}"))
+        if new_result.next_action_hint:
+            print(f"  {new_result.next_action_hint}")
+        return 2
+
+    baseline_result = get_registered_schema(schema_name)
+    if not baseline_result.success:
+        print(red(f"✗ No snapshot found for '{schema_name}'."))
+        table_hint = f"--table {args.table}" if args.table else "--query '...'"
+        print(f"  Run:  shelfard postgres snapshot --dsn ... {table_hint} --name {schema_name}")
+        return 2
+
+    diff_result = compare_schemas_from_dicts(
+        baseline_result.data["schema"],
+        new_result.data["schema"],
+    )
+    if not diff_result.success:
+        print(red(f"✗ Comparison failed: {diff_result.error}"))
+        return 2
+
+    diff = diff_result.data["diff"]
+    _print_diff(schema_name, diff, baseline_result.data["version"])
+    return 0 if not diff["changes"] else 1
+
+
 # ── show command ──────────────────────────────────────────────────────────────
 
 def cmd_show(args) -> int:
@@ -280,20 +353,50 @@ def cmd_subscribe(args) -> int:
 # ── Checker commands ──────────────────────────────────────────────────────────
 
 def cmd_checker_register(args) -> int:
-    headers = []
-    for item in args.header or []:
-        if "=" not in item:
-            print(f"Warning: ignoring malformed --header {item!r} (expected KEY=VALUE)")
-            continue
-        k, _, v = item.partition("=")
-        headers.append({k.strip(): v.strip()})
+    checker_type = args.checker_type or "rest"
 
-    config = RestCheckerConfig(
-        schema_name=args.schema_name,
-        url=args.url,
-        headers=headers,
-        env=args.env or [],
-    )
+    if checker_type == "rest":
+        if not args.url:
+            print(red("✗ --url is required for rest checkers"))
+            return 2
+        headers = []
+        for item in args.header or []:
+            if "=" not in item:
+                print(f"Warning: ignoring malformed --header {item!r} (expected KEY=VALUE)")
+                continue
+            k, _, v = item.partition("=")
+            headers.append({k.strip(): v.strip()})
+        config = RestCheckerConfig(
+            schema_name=args.schema_name,
+            url=args.url,
+            headers=headers,
+            env=args.env or [],
+        )
+
+    elif checker_type == "postgres":
+        if not args.dsn:
+            print(red("✗ --dsn is required for postgres checkers"))
+            return 2
+        if not args.table and not args.query:
+            print(red("✗ Either --table or --query is required for postgres checkers"))
+            return 2
+        if args.table and args.query:
+            print(red("✗ Provide either --table or --query, not both"))
+            return 2
+        config = PostgresCheckerConfig(
+            schema_name=args.schema_name,
+            dsn=args.dsn,
+            env=args.env or [],
+            table=args.table or None,
+            query=args.query or None,
+            db_schema=args.db_schema or "public",
+            sample_size=args.sample_size or 100,
+        )
+
+    else:
+        print(red(f"✗ Unknown checker type: {checker_type!r}"))
+        return 2
+
     result = register_checker(args.schema_name, config)
     if not result.success:
         print(red(f"✗ {result.error}"))
@@ -302,7 +405,7 @@ def cmd_checker_register(args) -> int:
     env_count = len(config.env)
     env_str = f"{env_count} env var{'s' if env_count != 1 else ''}"
     print(green(f"✓ Checker registered for '{args.schema_name}'") +
-          f"  (rest · {env_str})")
+          f"  ({checker_type} · {env_str})")
     return 0
 
 
@@ -312,8 +415,13 @@ def cmd_checker_run(args) -> int:
         print(red(f"✗ {checker_result.error}"))
         return 2
 
-    url = checker_result.data["checker"]["url"]
-    print(f"Fetching {url} …")
+    c = checker_result.data["checker"]
+    if c.get("checker_type") == "postgres":
+        target = c.get("table") or "(custom query)"
+        print(f"Checking PostgreSQL '{target}' …")
+    else:
+        print(f"Fetching {c.get('url', '')} …")
+
     result = run_checker(args.schema_name)
     if not result.success:
         print(red(f"✗ {result.error}"))
@@ -331,16 +439,30 @@ def cmd_checker_show(args) -> int:
         return 2
 
     c = result.data["checker"]
+    checker_type = c.get("checker_type", "rest")
     print(f"\nChecker: {args.schema_name}")
-    print(f"  type:  {c['checker_type']}")
-    print(f"  url:   {c['url']}")
-    if c["env"]:
-        print(f"  env:   {', '.join(c['env'])}")
-    if c["headers"]:
-        print("  headers:")
-        for entry in c["headers"]:
-            for k, v in entry.items():
-                print(f"    {k}: {v}")
+    print(f"  type:  {checker_type}")
+
+    if checker_type == "postgres":
+        print(f"  dsn:   {c.get('dsn', '')}")
+        if c.get("table"):
+            print(f"  table: {c['table']}")
+        if c.get("query"):
+            print(f"  query: {c['query']}")
+        if c.get("db_schema") and c["db_schema"] != "public":
+            print(f"  schema: {c['db_schema']}")
+        if c.get("env"):
+            print(f"  env:   {', '.join(c['env'])}")
+    else:
+        print(f"  url:   {c.get('url', '')}")
+        if c.get("env"):
+            print(f"  env:   {', '.join(c['env'])}")
+        if c.get("headers"):
+            print("  headers:")
+            for entry in c["headers"]:
+                for k, v in entry.items():
+                    print(f"    {k}: {v}")
+
     print()
     return 0
 
@@ -358,10 +480,11 @@ def cmd_checker_list(_args) -> int:
 
     print(f"\nCheckers ({len(checkers)}):\n")
     for c in checkers:
-        env_str = ", ".join(c["env"]) if c["env"] else "—"
+        env_str = ", ".join(c["env"]) if c.get("env") else "—"
+        target = c.get("url") or c.get("dsn") or "—"
         print(
-            f"  {c['schema_name']:<20} {c['checker_type']:<6} "
-            f"{c['url']:<45} {env_str:<20} {c['registered_at'] or ''}"
+            f"  {c['schema_name']:<20} {c['checker_type']:<8} "
+            f"{target:<45} {env_str:<20} {c.get('registered_at') or ''}"
         )
     print()
     return 0
@@ -418,6 +541,46 @@ def _add_rest_subcommands(top) -> None:
     chk.set_defaults(func=cmd_rest_check)
 
 
+def _add_postgres_subcommands(top) -> None:
+    pg_p = top.add_parser("postgres", help="PostgreSQL schema reader")
+    pg_cmds = pg_p.add_subparsers(dest="command", required=True, metavar="COMMAND")
+
+    # Shared base options for all postgres commands
+    pg_base = argparse.ArgumentParser(add_help=False)
+    pg_base.add_argument(
+        "--dsn", metavar="DSN", required=True,
+        help="PostgreSQL connection string (may contain $VAR placeholders)",
+    )
+    pg_base.add_argument(
+        "--name", metavar="NAME", required=True,
+        help="Schema name used to store and retrieve from the registry",
+    )
+    pg_base.add_argument(
+        "--table", metavar="TABLE", default=None,
+        help="Table or view name to introspect (table mode)",
+    )
+    pg_base.add_argument(
+        "--query", metavar="SQL", default=None,
+        help="SQL query whose result shape defines the schema (query mode)",
+    )
+    pg_base.add_argument(
+        "--db-schema", metavar="SCHEMA", default="public",
+        help="PostgreSQL schema namespace to search in (default: public)",
+    )
+
+    snap = pg_cmds.add_parser(
+        "snapshot", parents=[pg_base],
+        help="Read a PostgreSQL table or query and save its schema to the registry",
+    )
+    snap.set_defaults(func=cmd_postgres_snapshot)
+
+    chk = pg_cmds.add_parser(
+        "check", parents=[pg_base],
+        help="Read a PostgreSQL table or query and compare against the saved snapshot",
+    )
+    chk.set_defaults(func=cmd_postgres_check)
+
+
 def _add_checker_subcommands(top) -> None:
     checker_p = top.add_parser("checker", help="Manage stored drift-check configurations")
     checker_cmds = checker_p.add_subparsers(dest="command", required=True, metavar="COMMAND")
@@ -427,11 +590,29 @@ def _add_checker_subcommands(top) -> None:
         help="Register a checker config for a schema",
     )
     reg.add_argument("schema_name", help="Schema name to register a checker for")
-    reg.add_argument("--url", required=True, help="Endpoint URL (may contain $VAR placeholders)")
+    reg.add_argument(
+        "--type", dest="checker_type", default="rest", choices=["rest", "postgres"],
+        help="Checker type (default: rest)",
+    )
+    # REST options
+    reg.add_argument("--url", default=None,
+                     help="[rest] Endpoint URL (may contain $VAR placeholders)")
     reg.add_argument(
         "--header", metavar="KEY=VALUE", action="append", default=[],
-        help="Header to send; values may contain $VAR placeholders (repeatable)",
+        help="[rest] Header to send; values may contain $VAR placeholders (repeatable)",
     )
+    # PostgreSQL options
+    reg.add_argument("--dsn", default=None,
+                     help="[postgres] Connection string (may contain $VAR placeholders)")
+    reg.add_argument("--table", default=None,
+                     help="[postgres] Table or view name (table mode)")
+    reg.add_argument("--query", default=None,
+                     help="[postgres] SQL query whose result defines the schema (query mode)")
+    reg.add_argument("--db-schema", default="public",
+                     help="[postgres] PostgreSQL schema namespace (default: public)")
+    reg.add_argument("--sample-size", type=int, default=100,
+                     help="[postgres] Rows to sample for nullability inference (default: 100)")
+    # Common
     reg.add_argument(
         "--env", metavar="VAR", action="append", default=[],
         help="Env var name required at run time (repeatable)",
@@ -468,9 +649,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     _add_rest_subcommands(top)
+    _add_postgres_subcommands(top)
     _add_checker_subcommands(top)
-    # Future: _add_sqlite_subcommands(top)
-    # Future: _add_postgres_subcommands(top)
 
     agent_p = top.add_parser(
         "agent",

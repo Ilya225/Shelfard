@@ -1,14 +1,21 @@
 """
 Standalone test runner — no pytest needed.
 Run: python3 run_tests.py
+
+Covers basic pre-registry tests: SQLite introspection, schema comparison,
+type normalization, severity roll-up, and pure STRUCT drift detection.
+
+Domain-specific tests live in:
+  tests/registry_tests.py    — schema registry + consumer subscriptions
+  tests/parsers_tests.py     — JSON file reader + STRUCT inference
+  tests/rest_tests.py        — REST endpoint reader (mock HTTP server)
+  tests/postgresql_tests.py  — PostgreSQL reader + checker (mocked psycopg2)
 """
 
 import sys
 import traceback
 import sqlite3
 import tempfile
-import os
-import json
 from pathlib import Path
 
 # Make tools importable
@@ -16,16 +23,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from shelfard import (
     ColumnSchema, TableSchema, ColumnType, ChangeSeverity, ChangeType,
-    ConsumerSubscription, LocalFileRegistry,
-    get_sqlite_schema, register_schema, get_registered_schema,
-    compare_schemas, compare_schemas_from_dicts, get_schema_from_json,
-    infer_schema_from_json_file, read_and_register_json_file,
-    subscribe_consumer, get_consumer_subscription,
-    get_consumers_for_table, get_consumers_affected_by_diff,
+    get_sqlite_schema, compare_schemas,
 )
-from shelfard.schema_comparison import compare_schemas as _compare_schemas_raw
-from shelfard.models import SchemaDiff, ColumnChange
-import shelfard.registry as registry
 
 # ─────────────────────────────────────────────
 # Minimal test framework
@@ -129,65 +128,16 @@ def test_varchar_length_captured():
 test("varchar length is captured", test_varchar_length_captured)
 
 
-section("Schema Registry")
-
-def make_orders_v1():
-    return TableSchema(
-        table_name="orders",
-        columns=[
-            ColumnSchema("order_id",    ColumnType.INTEGER,   nullable=False),
-            ColumnSchema("customer_id", ColumnType.INTEGER,   nullable=False),
-            ColumnSchema("amount",      ColumnType.DECIMAL,   nullable=True, precision=18, scale=4),
-            ColumnSchema("status",      ColumnType.VARCHAR,   nullable=True, max_length=50),
-            ColumnSchema("created_at",  ColumnType.TIMESTAMP, nullable=False),
-        ],
-        source="test"
-    )
-
-def test_register_and_retrieve():
-    with tempfile.TemporaryDirectory() as tmp:
-        registry._default._root = Path(tmp)
-        schema = make_orders_v1()
-        reg = register_schema("orders", schema)
-        assert reg.success
-        get = get_registered_schema("orders")
-        assert get.success
-        assert get.data["schema"]["table_name"] == "orders"
-        assert len(get.data["schema"]["columns"]) == 5
-
-test("register and retrieve schema", test_register_and_retrieve)
-
-def test_unregistered_table():
-    with tempfile.TemporaryDirectory() as tmp:
-        registry._default._root = Path(tmp)
-        result = get_registered_schema("nonexistent")
-        assert not result.success
-        assert result.next_action_hint is not None
-
-test("unregistered table returns helpful error", test_unregistered_table)
-
-def test_multiple_versions():
-    with tempfile.TemporaryDirectory() as tmp:
-        registry._default._root = Path(tmp)
-        v1 = make_orders_v1()
-        register_schema("orders", v1)
-        v2 = TableSchema(
-            table_name="orders",
-            columns=v1.columns + [ColumnSchema("notes", ColumnType.TEXT, nullable=True)],
-            source="test"
-        )
-        register_schema("orders", v2)
-        result = get_registered_schema("orders", version="latest")
-        assert result.success
-        assert len(result.data["schema"]["columns"]) == 6
-
-test("multiple versions — latest returns newest", test_multiple_versions)
-
-
 section("Schema Comparison — No Changes")
 
 def test_identical_schemas():
-    schema = make_orders_v1()
+    schema = make_schema("orders", [
+        ColumnSchema("order_id",    ColumnType.INTEGER,   nullable=False),
+        ColumnSchema("customer_id", ColumnType.INTEGER,   nullable=False),
+        ColumnSchema("amount",      ColumnType.DECIMAL,   nullable=True, precision=18, scale=4),
+        ColumnSchema("status",      ColumnType.VARCHAR,   nullable=True, max_length=50),
+        ColumnSchema("created_at",  ColumnType.TIMESTAMP, nullable=False),
+    ])
     result = compare_schemas(schema, schema)
     assert result.success
     diff = result.data["diff"]
@@ -198,6 +148,15 @@ test("identical schemas produce no changes", test_identical_schemas)
 
 
 section("Schema Comparison — Column Additions")
+
+def make_orders_v1():
+    return make_schema("orders", [
+        ColumnSchema("order_id",    ColumnType.INTEGER,   nullable=False),
+        ColumnSchema("customer_id", ColumnType.INTEGER,   nullable=False),
+        ColumnSchema("amount",      ColumnType.DECIMAL,   nullable=True, precision=18, scale=4),
+        ColumnSchema("status",      ColumnType.VARCHAR,   nullable=True, max_length=50),
+        ColumnSchema("created_at",  ColumnType.TIMESTAMP, nullable=False),
+    ])
 
 def test_nullable_column_added_is_safe():
     old = make_orders_v1()
@@ -409,269 +368,7 @@ def test_saas_schema_update():
 test("SaaS rename + new columns + widening detected correctly", test_saas_schema_update)
 
 
-section("End-to-End: SQLite → Registry → Compare")
-
-def test_full_pipeline():
-    with tempfile.TemporaryDirectory() as tmp:
-        registry._default._root = Path(tmp)
-        db = f"{tmp}/events.db"
-
-        # Create v1
-        conn = sqlite3.connect(db)
-        conn.execute("""
-            CREATE TABLE events (
-                event_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                event_type VARCHAR(100) NOT NULL,
-                payload TEXT,
-                occurred_at TIMESTAMP NOT NULL
-            )
-        """)
-        conn.commit(); conn.close()
-
-        # Introspect and register
-        v1_result = get_sqlite_schema(db, "events")
-        assert v1_result.success
-
-        raw = v1_result.data["schema"]
-        v1_schema = TableSchema(
-            table_name=raw["table_name"],
-            columns=[ColumnSchema(
-                name=c["name"],
-                col_type=ColumnType(c["col_type"]),
-                nullable=c["nullable"],
-                max_length=c.get("max_length"),
-            ) for c in raw["columns"]],
-            source="sqlite"
-        )
-        assert register_schema("events", v1_schema).success
-
-        # v2 schema arrives as JSON (simulating Kafka or API payload)
-        v2_dict = {
-            "table_name": "events",
-            "columns": [
-                {"name": "event_id",   "col_type": "integer",   "nullable": False},
-                {"name": "user_id",    "col_type": "integer",   "nullable": False},
-                {"name": "event_type", "col_type": "varchar",   "nullable": False, "max_length": 100},
-                {"name": "payload",    "col_type": "json",      "nullable": True},    # text→json: BREAKING
-                {"name": "occurred_at","col_type": "timestamp", "nullable": False},
-                {"name": "session_id", "col_type": "varchar",   "nullable": True, "max_length": 64},  # new: SAFE
-            ]
-        }
-
-        registered = get_registered_schema("events")
-        assert registered.success
-
-        diff_result = compare_schemas_from_dicts(registered.data["schema"], v2_dict)
-        assert diff_result.success
-
-        diff = diff_result.data["diff"]
-        change_types = [c["change_type"] for c in diff["changes"]]
-
-        assert ChangeType.COLUMN_ADDED in change_types    # session_id
-        assert ChangeType.TYPE_CHANGED in change_types    # payload: text → json
-        assert diff["overall_severity"] == ChangeSeverity.BREAKING
-
-        print(f"\n    {diff['summary']}")
-
-test("full pipeline: introspect → register → detect drift", test_full_pipeline)
-
-
-section("JSON File Reader")
-
-def test_basic_type_inference():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = f"{tmp}/payload.json"
-        with open(path, "w") as f:
-            json.dump({
-                "count": 42,
-                "ratio": 3.14,
-                "active": True,
-                "label": "hello",
-                "tags": ["a", "b"],
-                "meta": {"k": "v"},
-                "deleted_at": None,
-            }, f)
-        result = infer_schema_from_json_file(path, "payload")
-        assert result.success, result.error
-        cols = {c["name"]: c for c in result.data["schema"]["columns"]}
-        assert cols["count"]["col_type"]      == ColumnType.INTEGER
-        assert cols["ratio"]["col_type"]      == ColumnType.FLOAT
-        assert cols["active"]["col_type"]     == ColumnType.BOOLEAN
-        assert cols["label"]["col_type"]      == ColumnType.VARCHAR
-        assert cols["tags"]["col_type"]       == ColumnType.ARRAY
-        assert cols["meta"]["col_type"]       == ColumnType.STRUCT
-        assert cols["deleted_at"]["col_type"] == ColumnType.UNKNOWN
-
-test("basic type inference (int/float/bool/str/list/dict/null)", test_basic_type_inference)
-
-def test_datetime_string_detection():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = f"{tmp}/ts.json"
-        with open(path, "w") as f:
-            json.dump({"created_at": "2024-01-15T10:30:00"}, f)
-        result = infer_schema_from_json_file(path, "ts")
-        assert result.success, result.error
-        col = result.data["schema"]["columns"][0]
-        assert col["col_type"] == ColumnType.TIMESTAMP
-
-test("datetime string → TIMESTAMP", test_datetime_string_detection)
-
-def test_date_string_detection():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = f"{tmp}/dt.json"
-        with open(path, "w") as f:
-            json.dump({"birth_date": "2024-01-15"}, f)
-        result = infer_schema_from_json_file(path, "dt")
-        assert result.success, result.error
-        col = result.data["schema"]["columns"][0]
-        assert col["col_type"] == ColumnType.DATE
-
-test("date string → DATE", test_date_string_detection)
-
-def test_nullable_inference():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = f"{tmp}/null.json"
-        with open(path, "w") as f:
-            json.dump({"present": "value", "absent": None}, f)
-        result = infer_schema_from_json_file(path, "null")
-        assert result.success, result.error
-        cols = {c["name"]: c for c in result.data["schema"]["columns"]}
-        assert cols["present"]["nullable"] == False
-        assert cols["absent"]["nullable"]  == True
-
-test("null field → nullable=True, non-null → nullable=False", test_nullable_inference)
-
-def test_bool_before_int():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = f"{tmp}/bool.json"
-        with open(path, "w") as f:
-            json.dump({"flag_true": True, "flag_false": False}, f)
-        result = infer_schema_from_json_file(path, "bool")
-        assert result.success, result.error
-        cols = {c["name"]: c for c in result.data["schema"]["columns"]}
-        assert cols["flag_true"]["col_type"]  == ColumnType.BOOLEAN
-        assert cols["flag_false"]["col_type"] == ColumnType.BOOLEAN
-
-test("bool values → BOOLEAN (not INTEGER)", test_bool_before_int)
-
-def test_root_level_array():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = f"{tmp}/arr.json"
-        with open(path, "w") as f:
-            json.dump([{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}], f)
-        result = infer_schema_from_json_file(path, "arr")
-        assert result.success, result.error
-        cols = {c["name"]: c for c in result.data["schema"]["columns"]}
-        assert cols["id"]["col_type"]   == ColumnType.INTEGER
-        assert cols["name"]["col_type"] == ColumnType.VARCHAR
-
-test("root-level array → uses first element", test_root_level_array)
-
-def test_file_not_found():
-    result = infer_schema_from_json_file("/nonexistent/payload.json", "x")
-    assert not result.success
-    assert "not found" in result.error.lower()
-
-test("file not found → ToolResult(success=False)", test_file_not_found)
-
-def test_read_and_register():
-    with tempfile.TemporaryDirectory() as tmp:
-        registry._default._root = Path(tmp)
-        path = f"{tmp}/api_response.json"
-        with open(path, "w") as f:
-            json.dump({
-                "user_id": 99,
-                "email": "user@example.com",
-                "verified": True,
-                "created_at": "2024-03-01T12:00:00",
-            }, f)
-        reg_result = read_and_register_json_file(path, "api_response")
-        assert reg_result.success, reg_result.error
-
-        get_result = get_registered_schema("api_response")
-        assert get_result.success
-        cols = {c["name"]: c for c in get_result.data["schema"]["columns"]}
-        assert cols["user_id"]["col_type"]    == ColumnType.INTEGER
-        assert cols["email"]["col_type"]      == ColumnType.VARCHAR
-        assert cols["verified"]["col_type"]   == ColumnType.BOOLEAN
-        assert cols["created_at"]["col_type"] == ColumnType.TIMESTAMP
-
-test("end-to-end: read JSON file + register + retrieve from registry", test_read_and_register)
-
-
-section("STRUCT Type — Nested Schema")
-
-def test_nested_object_becomes_struct():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = f"{tmp}/nested.json"
-        with open(path, "w") as f:
-            json.dump({"user": {"id": 1, "name": "Alice"}}, f)
-        result = infer_schema_from_json_file(path, "nested")
-        assert result.success, result.error
-        cols = {c["name"]: c for c in result.data["schema"]["columns"]}
-        assert cols["user"]["col_type"] == ColumnType.STRUCT
-        fields = {f["name"]: f for f in cols["user"]["fields"]}
-        assert fields["id"]["col_type"]   == ColumnType.INTEGER
-        assert fields["name"]["col_type"] == ColumnType.VARCHAR
-
-test("nested dict → STRUCT with correct child fields", test_nested_object_becomes_struct)
-
-def test_deep_nesting():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = f"{tmp}/deep.json"
-        with open(path, "w") as f:
-            json.dump({"a": {"b": {"c": 42}}}, f)
-        result = infer_schema_from_json_file(path, "deep")
-        assert result.success, result.error
-        top = result.data["schema"]["columns"][0]
-        assert top["col_type"] == ColumnType.STRUCT
-        mid = top["fields"][0]
-        assert mid["col_type"] == ColumnType.STRUCT
-        leaf = mid["fields"][0]
-        assert leaf["col_type"] == ColumnType.INTEGER
-
-test("3-level deep nesting → STRUCT → STRUCT → INTEGER", test_deep_nesting)
-
-def test_struct_field_types():
-    with tempfile.TemporaryDirectory() as tmp:
-        path = f"{tmp}/mixed.json"
-        with open(path, "w") as f:
-            json.dump({"address": {
-                "street": "Main St",
-                "number": 42,
-                "active": True,
-                "note": None,
-            }}, f)
-        result = infer_schema_from_json_file(path, "mixed")
-        assert result.success, result.error
-        struct_col = result.data["schema"]["columns"][0]
-        fields = {f["name"]: f for f in struct_col["fields"]}
-        assert fields["street"]["col_type"] == ColumnType.VARCHAR
-        assert fields["number"]["col_type"] == ColumnType.INTEGER
-        assert fields["active"]["col_type"] == ColumnType.BOOLEAN
-        assert fields["note"]["col_type"]   == ColumnType.UNKNOWN
-        assert fields["note"]["nullable"]   == True
-
-test("mixed types inside STRUCT fields inferred correctly", test_struct_field_types)
-
-def test_struct_roundtrip():
-    with tempfile.TemporaryDirectory() as tmp:
-        registry._default._root = Path(tmp)
-        path = f"{tmp}/event.json"
-        with open(path, "w") as f:
-            json.dump({"payload": {"event_type": "click", "value": 1}}, f)
-        assert read_and_register_json_file(path, "event").success
-
-        get_result = get_registered_schema("event")
-        assert get_result.success
-        cols = {c["name"]: c for c in get_result.data["schema"]["columns"]}
-        assert cols["payload"]["col_type"] == ColumnType.STRUCT
-        fields = {f["name"]: f for f in cols["payload"]["fields"]}
-        assert fields["event_type"]["col_type"] == ColumnType.VARCHAR
-        assert fields["value"]["col_type"]      == ColumnType.INTEGER
-
-test("STRUCT round-trip: infer → register → retrieve → fields preserved", test_struct_roundtrip)
+section("STRUCT Drift — Pure Comparison")
 
 def test_struct_drift_field_added():
     old = TableSchema("t", [
@@ -745,131 +442,6 @@ def test_qualified_names_in_nested_diff():
     assert diff["changes"][0]["severity"] == ChangeSeverity.BREAKING
 
 test("3-level nested drift uses fully qualified name 'user.address.zip'", test_qualified_names_in_nested_diff)
-
-
-section("Consumer Subscriptions")
-
-def _make_users_schema():
-    return TableSchema(
-        table_name="users",
-        columns=[
-            ColumnSchema("id",         ColumnType.INTEGER,   nullable=False),
-            ColumnSchema("email",      ColumnType.VARCHAR,   nullable=False),
-            ColumnSchema("name",       ColumnType.TEXT,      nullable=True),
-            ColumnSchema("created_at", ColumnType.TIMESTAMP, nullable=False),
-        ],
-        source="test",
-    )
-
-def test_subscribe_consumer_full():
-    with tempfile.TemporaryDirectory() as tmp:
-        r = LocalFileRegistry(tmp)
-        r.register_schema("users", _make_users_schema())
-        result = r.subscribe_consumer("analytics", "users")
-        assert result.success, result.error
-        assert result.data["column_count"] == 4
-        assert result.data["subscribed_columns"] is None
-
-test("full subscription snapshots all columns", test_subscribe_consumer_full)
-
-def test_subscribe_consumer_projection():
-    with tempfile.TemporaryDirectory() as tmp:
-        r = LocalFileRegistry(tmp)
-        r.register_schema("users", _make_users_schema())
-        result = r.subscribe_consumer("reporting", "users", columns=["email", "created_at"])
-        assert result.success, result.error
-        assert result.data["column_count"] == 2
-        assert result.data["subscribed_columns"] == ["email", "created_at"]
-
-        sub_result = r.get_consumer_subscription("reporting", "users")
-        assert sub_result.success
-        sub = sub_result.data["subscription"]
-        assert len(sub["schema"]["columns"]) == 2
-        col_names = [c["name"] for c in sub["schema"]["columns"]]
-        assert "email" in col_names
-        assert "created_at" in col_names
-
-test("projection subscription captures only requested columns", test_subscribe_consumer_projection)
-
-def test_subscribe_consumer_unknown_source():
-    with tempfile.TemporaryDirectory() as tmp:
-        r = LocalFileRegistry(tmp)
-        result = r.subscribe_consumer("analytics", "nonexistent")
-        assert not result.success
-        assert "nonexistent" in result.error.lower() or "not registered" in result.error.lower()
-
-test("subscribe to unregistered source → helpful error", test_subscribe_consumer_unknown_source)
-
-def test_get_consumers_for_table():
-    with tempfile.TemporaryDirectory() as tmp:
-        r = LocalFileRegistry(tmp)
-        r.register_schema("users", _make_users_schema())
-        r.subscribe_consumer("analytics",  "users")
-        r.subscribe_consumer("reporting",  "users", columns=["email"])
-        result = r.get_consumers_for_table("users")
-        assert result.success
-        consumers = {c["consumer"]: c for c in result.data["consumers"]}
-        assert "analytics" in consumers
-        assert "reporting" in consumers
-        assert consumers["analytics"]["subscribed_columns"] is None
-        assert consumers["reporting"]["subscribed_columns"] == ["email"]
-
-test("get_consumers_for_table lists all subscribers", test_get_consumers_for_table)
-
-def test_get_consumers_affected_full_subscription():
-    from shelfard.models import SchemaDiff, ColumnChange, ChangeType, ChangeSeverity
-    with tempfile.TemporaryDirectory() as tmp:
-        r = LocalFileRegistry(tmp)
-        r.register_schema("users", _make_users_schema())
-        r.subscribe_consumer("analytics", "users")  # full subscription
-
-        diff = SchemaDiff(
-            table_name="users",
-            old_schema_version="v1",
-            new_schema_version="v2",
-            changes=[ColumnChange(
-                change_type=ChangeType.COLUMN_REMOVED,
-                column_name="name",
-                severity=ChangeSeverity.BREAKING,
-                reasoning="Column removed",
-            )],
-            overall_severity=ChangeSeverity.BREAKING,
-        )
-        result = r.get_consumers_affected_by_diff("users", diff)
-        assert result.success
-        affected = {a["consumer"]: a for a in result.data["affected"]}
-        assert "analytics" in affected
-        assert len(affected["analytics"]["impacted_changes"]) == 1
-
-test("full subscriber is always affected by any change", test_get_consumers_affected_full_subscription)
-
-def test_get_consumers_affected_projection():
-    from shelfard.models import SchemaDiff, ColumnChange, ChangeType, ChangeSeverity
-    with tempfile.TemporaryDirectory() as tmp:
-        r = LocalFileRegistry(tmp)
-        r.register_schema("users", _make_users_schema())
-        r.subscribe_consumer("email_svc", "users", columns=["email"])
-        r.subscribe_consumer("name_svc",  "users", columns=["name"])
-
-        diff = SchemaDiff(
-            table_name="users",
-            old_schema_version="v1",
-            new_schema_version="v2",
-            changes=[ColumnChange(
-                change_type=ChangeType.COLUMN_REMOVED,
-                column_name="name",
-                severity=ChangeSeverity.BREAKING,
-                reasoning="Column removed",
-            )],
-            overall_severity=ChangeSeverity.BREAKING,
-        )
-        result = r.get_consumers_affected_by_diff("users", diff)
-        assert result.success
-        affected = {a["consumer"]: a for a in result.data["affected"]}
-        assert "name_svc" in affected          # subscribed to 'name' — affected
-        assert "email_svc" not in affected     # subscribed to 'email' only — not affected
-
-test("projection subscriber only affected when their columns change", test_get_consumers_affected_projection)
 
 
 # ─────────────────────────────────────────────

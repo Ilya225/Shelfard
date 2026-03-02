@@ -18,6 +18,9 @@ dependencies = [
     "langchain-mcp-adapters>=0.1",
 ]
 
+[project.optional-dependencies]
+postgres = ["psycopg2-binary>=2.9"]
+
 [project.urls]
 Homepage = "https://github.com/Ilya225/shelfard"
 Repository = "https://github.com/Ilya225/shelfard"
